@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# @Time    : 2024/3/11 下午9:39
+# @Time    : 2024/3/9 下午8:25
 # @Author  : Finley
 # @File    : train_qlora.py
 # @Software: PyCharm
@@ -19,6 +19,7 @@ from transformers import (
     TrainingArguments,
     AutoModelForCausalLM
 )
+
 from component.collator import SFTDataCollator
 from component.dataset import SFTDataset
 from component.argument import QLoRAArguments
@@ -27,10 +28,13 @@ from component.loss import TargetLMLoss
 
 
 def verify_model_dtype(model):
-    dtype2param_num = defaultdict(int)
-    dtype2param_name = defaultdict(list)
-    dtype2trainable_param_num = defaultdict(int)
-    dtype2trainable_param_name = defaultdict(list)
+    """
+    查看模型种各种类型的参数的情况
+    """
+    dtype2param_num = defaultdict(int)  # 每种数据类型的参数量
+    dtype2param_name = defaultdict(list)  # 每种数据类型的参数名称
+    dtype2trainable_param_num = defaultdict(int)  # 每种数据类型参与训练的参数量
+    dtype2trainable_param_name = defaultdict(list)  # 每种数据类型参与训练的参数名称
     for name, p in model.named_parameters():
         dtype = p.dtype
         dtype2param_num[dtype] += p.numel()
@@ -38,6 +42,7 @@ def verify_model_dtype(model):
         if p.requires_grad:
             dtype2trainable_param_num[dtype] += p.numel()
             dtype2trainable_param_name[dtype].append(name)
+    # 统计全部参数中，各种类型参数分布
     total = 0
     print('verify all params of the model')
     for k, v in dtype2param_num.items():
@@ -46,8 +51,9 @@ def verify_model_dtype(model):
         print(k, v, v / total)
     for k, v in dtype2trainable_param_name.items():
         print(k, v)
-    print()
 
+    print()
+    # 统计可训练参数中，各种类型参数分布
     print('verify trainable params the model')
     total_trainable = 0
     for k, v in dtype2trainable_param_num.items():
@@ -60,54 +66,65 @@ def verify_model_dtype(model):
 
 def find_all_linear_names(model):
     """
-    Find all linear layer names in the model
-    :param model:
-    :return:
+    找出所有全连接层，为所有全连接添加adapter
     """
     cls = bnb.nn.Linear4bit
     lora_module_names = set()
     for name, module in model.named_modules():
         if isinstance(module, cls):
             names = name.split('.')
-            lora_module_names.add(names[0] if len(names)==1 else names[-1])
+            lora_module_names.add(names[0] if len(names) == 1 else names[-1])
+
     if 'lm_head' in lora_module_names:
         lora_module_names.remove('lm_head')
     return list(lora_module_names)
 
 
 def setup_everything():
+    print("setup_everything")
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--train_args_file", type=str, default="config/config.json", help="The path to the training arguments file"
+        "--train_args_file",
+        type=str,
+        default="config/config.json",
+        help="The path to the training arguments file"
     )
     args = parser.parse_args()
     train_args_file = args.train_args_file
-    parser = HfArgumentParser((QLoRAArguments, TrainingArguments))
+    # 读取训练的参数配置
+    parser = HfArgumentParser(
+        (QLoRAArguments, TrainingArguments)
+    )
+    # 解析得到自定义参数，以及自带参数
     args, training_args = parser.parse_json_file(json_file=train_args_file)
+    # 创建输出目录
     if not os.path.exists(training_args.output_dir):
         os.makedirs(training_args.output_dir)
+    # 设置随机种子
     set_seed(training_args.seed)
     return args, training_args
 
 
-def init_components(args, training_arges):
+def init_components(args, training_args):
     """
-    初始化自定义组件
-    :param args:
-    :param training_arges:
-    :return:
+    初始化各个组件
     """
-    # 多卡
-    # world_size = 2
-    # ddp = True
-    # device_map = "auto"
-    # if os.environ.get("LOCAL_RANK") is not None:
-    #     local_rank = int(os.environ.get("LOCAL_RANK", '0'))
-    #     device_map = {"": local_rank}
-    training_arges.ddp_find_unused_parameters = False
-    local_rank = int(os.environ.get("LOCAL_RANK", '0'))
-    device_map = {"": local_rank}
+    logger.info('Initializing components...')
 
+    # 多卡训练时打开
+    # ddp = True
+    device_map = "auto"
+    # if we are in a distributed setting, we need to set the device map and max memory per device
+    if os.environ.get('LOCAL_RANK') is not None:
+        local_rank = int(os.environ.get('LOCAL_RANK', '0'))
+        device_map = {'': local_rank}
+
+    # 单卡训练使用
+    # training_args.ddp_find_unused_parameters = False
+    # local_rank = int(os.environ.get("LOCAL_RANK", '0'))
+    # device_map = {"": local_rank}
+
+    # 加载模型
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
         device_map=device_map,
@@ -121,74 +138,88 @@ def init_components(args, training_arges):
             bnb_4bit_quant_type="nf4",
             llm_int8_threshold=6.0,
             llm_int8_has_fp16_weight=False
-        )
+        ),
     )
-
+    # 加载tokenzier
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name_or_path,
         trust_remote_code=True,
+        # llama不支持fast
         use_fast=False if model.config.model_type == "llama" else True
-
     )
 
     # Qwen Tokenizer比较特殊，pad_token_id bos_token_id eos_token_id 均为None，eod_id对应的token为<|endoftext|>
-    if tokenizer.__class__.__name__ == "QwenTokenizer":
+    if tokenizer.__class__.__name__ == "QWenTokenizer":
         tokenizer.pad_token_id = tokenizer.eod_id
         tokenizer.bos_token_id = tokenizer.eod_id
         tokenizer.eos_token_id = tokenizer.eod_id
-
+    # casts all the non int8 modules to full precision (fp32) for stability
     model = prepare_model_for_kbit_training(
         model,
-        use_gradient_checkpointing=training_arges.gradient_checkpointing
+        use_gradient_checkpointing=training_args.gradient_checkpointing
     )
-
     print(f"memory usage: {model.get_memory_footprint()/(1024*1024*1024)} GB")
+    # 找到所有需要插入adapter的全连接层
     target_modules = find_all_linear_names(model)
-
+    # 初始化lora配置
     config = LoraConfig(
         r=args.lora_rank,
         lora_alpha=args.lora_alpha,
         target_modules=target_modules,
         lora_dropout=args.lora_dropout,
         bias="none",
-        task_type="CAUSAL_LM"
-
+        task_type="CAUSAL_LM",
     )
-
     model = get_peft_model(model, config)
     model.print_trainable_parameters()
     model.config.torch_dtype = torch.float32
 
+    # 查看模型种各种类型的参数的情况
     verify_model_dtype(model)
 
-    loss_fn = TargetLMLoss(ignore_index=-100)
+    # 初始化损失函数
+    loss_func = TargetLMLoss(ignore_index=-100)
 
+    # 加载训练集
     train_dataset = SFTDataset(
         args.train_file,
         tokenizer,
         args.max_seq_length
     )
-    data_collator = SFTDataCollator(tokenizer, args.max_seq_length)
-
-    trainer = LoRATrainer(
-        model=model,
-        args=training_arges,
-        data_collator=data_collator,
-        compute_loss=loss_fn
+    data_collator = SFTDataCollator(
+        tokenizer,
+        args.max_seq_length
     )
 
+    # 初始化Trainer
+    trainer = LoRATrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        # tokenizer=tokenizer,
+        data_collator=data_collator,
+        compute_loss=loss_func
+    )
     return trainer
 
 
 def main():
+    # 进行一些配置和检查
     args, training_args = setup_everything()
+    # 加载各种组件
     trainer = init_components(args, training_args)
+    # 开始训练
     logger.info("Start training")
     train_result = trainer.train()
-    logger.info("Save the best checkpoint")
-    trainer.save_model(join(training_args.output_dir, "best_checkpoint"))
+    # 保存最好的checkpoint
+    final_save_path = join(training_args.output_dir, 'final')
+    trainer.save_model(final_save_path)  # Saves the tokenizer too
+    # 保存训练指标
     metrics = train_result.metrics
     trainer.log_metrics("train", metrics)
     trainer.save_metrics("train", metrics)
     trainer.save_state()
 
+
+if __name__ == "__main__":
+    main()

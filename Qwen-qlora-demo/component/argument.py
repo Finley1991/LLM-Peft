@@ -13,7 +13,7 @@ class CustomizedArguments:
     """
     自定义参数
     """
-    max_seq_length: int = field(metadata={"help:输入最大长度"})
+    max_seq_length: int = field(metadata={"help":"输入最大长度"})
     train_file: str = field(metadata={"help": "训练集"})
     model_name_or_path: str = field(metadata={"help": "预训练权重路径"})
     eval_file: Optional[str] = field(default="", metadata={"help": "评测数据集"})
@@ -24,7 +24,7 @@ class QLoRAArguments:
     """
     自定义参数
     """
-    max_seq_length: int = field(metadata={"help:输入最大长度"})
+    max_seq_length: int = field(metadata={"help":"输入最大长度"})
     train_file: str = field(metadata={"help": "训练集"})
     model_name_or_path: str = field(metadata={"help": "预训练权重路径"})
     task_type: str = field(default="", metadata={"help": "预训练任务：[sft, pretrain]"})

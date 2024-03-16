@@ -14,7 +14,7 @@ from transformers import (
     TrainerCallback
 )
 from typing import Callable, Dict, List, Optional, Tuple, Union, Any
-import torch.nn as nn
+from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from transformers.utils import logging
 import os

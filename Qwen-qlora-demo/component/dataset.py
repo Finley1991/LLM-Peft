@@ -7,6 +7,7 @@
 import json
 from loguru import logger
 from torch.utils.data import Dataset
+from transformers import AutoTokenizer
 
 
 class SFTDataset(Dataset):
@@ -58,3 +59,15 @@ class SFTDataset(Dataset):
         return inputs
 
 
+if __name__ == "__main__":
+    tokenizer = AutoTokenizer.from_pretrained(
+        "/mnt/wangyafan/project/LLM-quickstart/hf/qwen/Qwen-14B",
+        trust_remote_code=True,
+        use_fast=True
+    )
+    dataset = SFTDataset(
+        "/mnt/wangyafan/project/LLM-Peft/Qwen-qlora-demo/data/text_matching_data_train.jsonl",
+        tokenizer,
+        1024
+    )
+    print(dataset[0])
